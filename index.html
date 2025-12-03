@@ -331,7 +331,7 @@ function checkNearbyPokemon() {
     const poke = pokemons[pokeId];
     if (!poke.lastPoint) continue;
     const dist = getDistance(userLocation.lat, userLocation.lng, poke.lastPoint.lat, poke.lastPoint.lng);
-    if (dist <= 10) {
+    if (dist <= 100) {
       nearbyPokemon = pokeId;
       break;
     }
